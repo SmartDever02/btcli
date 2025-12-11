@@ -1069,12 +1069,14 @@ async def show(
                 identities,
                 old_identities,
                 root_claim_types,
+                metagraph_info,
             ) = await asyncio.gather(
                 subtensor.all_subnets(block_hash=block_hash),
                 subtensor.get_subnet_state(netuid=0, block_hash=block_hash),
                 subtensor.query_all_identities(block_hash=block_hash),
                 subtensor.get_delegate_identities(block_hash=block_hash),
                 subtensor.get_all_coldkeys_claim_type(block_hash=block_hash),
+                subtensor.get_mechagraph_info(netuid=0, mech_id=0, block_hash=block_hash),  # NEW
             )
         root_info = next((s for s in all_subnets if s.netuid == 0), None)
         if root_info is None:
@@ -1092,6 +1094,10 @@ async def show(
             return
 
         tao_sum = sum(root_state.tao_stake).tao
+        
+        # NEW: Compute root swap emissions from MetagraphInfo
+        swap_emissions_dict = {hk: bal for hk, bal in metagraph_info.tao_dividends_per_hotkey}
+        swap_emissions_sum = sum(bal.tao for bal in swap_emissions_dict.values())
 
         table = Table(
             title=f"[{COLOR_PALETTE.G.HEADER}]Root Network\n[{COLOR_PALETTE.G.SUBHEAD}]"
@@ -1118,6 +1124,13 @@ async def show(
             f"[bold white]Emission ({Balance.get_unit(0)}/block)",
             style=COLOR_PALETTE["POOLS"]["EMISSION"],
             justify="center",
+        )
+        table.add_column(
+            "[bold white]Swap Emissions (τ)",
+            style=COLOR_PALETTE["POOLS"]["EXTRA_2"],
+            no_wrap=True,
+            justify="right",
+            footer=f"{swap_emissions_sum:.4f} τ" if verbose else f"{millify_tao(swap_emissions_sum)} τ",
         )
         table.add_column(
             "[bold white]Hotkey",
@@ -1173,6 +1186,8 @@ async def show(
             claim_type_info = root_claim_types.get(coldkey_ss58, {"type": "Swap"})
             total_subnets = len([n for n in all_subnets if n != 0])
             claim_type = format_claim_type_for_root(claim_type_info, total_subnets)
+            
+            swap_em = swap_emissions_dict.get(root_state.hotkeys[idx], Balance(0)).tao
 
             sorted_rows.append(
                 (
@@ -1187,6 +1202,7 @@ async def show(
                     if verbose
                     else f"τ {millify_tao(root_state.tao_stake[idx])}",  # Tao Stake
                     f"{total_emission_per_block}",  # Emission
+                    f"τ {swap_em:.4f}" if verbose else f"τ {millify_tao(swap_em)}",  # Swap Emissions
                     f"{root_state.hotkeys[idx][:6]}"
                     if not verbose
                     else f"{root_state.hotkeys[idx]}",  # Hotkey
@@ -1234,6 +1250,7 @@ async def show(
                 f"\n  TAO Pool: [{COLOR_PALETTE['POOLS']['ALPHA_IN']}]τ {tao_pool}[/{COLOR_PALETTE['POOLS']['ALPHA_IN']}]"
                 f"\n  Stake: [{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]τ {stake}[/{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]"
                 f"\n  Tempo: [{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]{root_info.blocks_since_last_step}/{root_info.tempo}[/{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]"
+                f"\n  Pending Root Swap: [{COLOR_PALETTE['POOLS']['EXTRA_2']}]{'τ ' + (f'{metagraph_info.pending_root_emission.tao:.4f}' if verbose else millify_tao(metagraph_info.pending_root_emission.tao))}[/{COLOR_PALETTE['POOLS']['EXTRA_2']}]"
             )
             console.print(
                 """
@@ -1244,6 +1261,7 @@ async def show(
             - TAO: The sum of all TAO balances for this hotkey across all subnets.
             - Stake: The stake balance of this hotkey on root (measured in TAO).
             - Emission: The emission accrued to this hotkey across all subnets every block measured in TAO.
+            - Swap Emissions: The pending TAO root swap emissions allocated to this hotkey via root dividends.
             - Hotkey: The hotkey ss58 address.
             - Coldkey: The coldkey ss58 address.
             - Root Claim: The root claim type for this coldkey. 'Swap' converts Alpha to TAO every epoch. 'Keep' keeps Alpha emissions. 
