@@ -1243,6 +1243,11 @@ async def show(
                 if not verbose
                 else f"{root_info.price.tao:,.4f}"
             )
+            pending_display = (
+                f"{metagraph_info.pending_root_emission.tao:.4f}"
+                if verbose
+                else millify_tao(metagraph_info.pending_root_emission.tao)
+            )
             console.print(
                 f"[{COLOR_PALETTE['GENERAL']['SUBHEADING']}]Root Network (Subnet 0)[/{COLOR_PALETTE['GENERAL']['SUBHEADING']}]"
                 f"\n  Rate: [{COLOR_PALETTE['GENERAL']['HOTKEY']}]{rate} τ/τ[/{COLOR_PALETTE['GENERAL']['HOTKEY']}]"
@@ -1250,7 +1255,7 @@ async def show(
                 f"\n  TAO Pool: [{COLOR_PALETTE['POOLS']['ALPHA_IN']}]τ {tao_pool}[/{COLOR_PALETTE['POOLS']['ALPHA_IN']}]"
                 f"\n  Stake: [{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]τ {stake}[/{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]"
                 f"\n  Tempo: [{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]{root_info.blocks_since_last_step}/{root_info.tempo}[/{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]"
-                f"\n  Pending Root Swap: [{COLOR_PALETTE['POOLS']['EXTRA_2']}]{'τ ' + (f'{metagraph_info.pending_root_emission.tao:.4f}' if verbose else millify_tao(metagraph_info.pending_root_emission.tao))}[/{COLOR_PALETTE['POOLS']['EXTRA_2']}]"
+                f"\n  Pending Root Swap: [{COLOR_PALETTE['POOLS']['EXTRA_2']}]{'τ ' + pending_display}[/{COLOR_PALETTE['POOLS']['EXTRA_2']}]"
             )
             console.print(
                 """
@@ -1407,6 +1412,10 @@ async def show(
                 )
             ),
         )
+        
+        # Compute root swap emissions from MetagraphInfo (already fetched)
+        swap_emissions_dict = {hk: bal for hk, bal in metagraph_info.tao_dividends_per_hotkey}
+        swap_emissions_sum = sum(bal.tao for bal in swap_emissions_dict.values())
 
         rows = []
         json_out_rows = []
@@ -1447,6 +1456,8 @@ async def show(
                 claim_type_info = root_claim_types.get(coldkey_ss58, {"type": "Swap"})
                 claim_type = format_claim_type_for_subnet(claim_type_info, netuid_)
 
+            swap_em = swap_emissions_dict.get(metagraph_info.hotkeys[idx], Balance(0)).tao
+            
             rows.append(
                 (
                     str(idx),  # UID
@@ -1459,6 +1470,7 @@ async def show(
                     f"τ {tao_stake.tao:.4f}"
                     if verbose
                     else f"τ {millify_tao(tao_stake)}",  # Tao Stake
+                    f"τ {swap_em:.4f}" if verbose else f"τ {millify_tao(swap_em)}",  # NEW: Root Swap Emissions
                     f"{metagraph_info.dividends[idx]:.6f}",  # Dividends
                     f"{metagraph_info.incentives[idx]:.6f}",  # Incentive
                     f"{Balance.from_tao(metagraph_info.emission[idx].tao).set_unit(netuid_).tao:.6f} {subnet_info.symbol}",  # Emissions
@@ -1525,6 +1537,13 @@ async def show(
             else f"{millify_tao(tao_sum)} {subnet_info.symbol}",
         )
         table.add_column(
+            "Root Swap Emissions (τ)",
+            style=COLOR_PALETTE["POOLS"]["EXTRA_2"],
+            no_wrap=True,
+            justify="right",
+            footer=f"{swap_emissions_sum:.4f} τ" if verbose else f"{millify_tao(swap_emissions_sum)} τ",
+        )
+        table.add_column(
             "Dividends",
             style=COLOR_PALETTE["POOLS"]["EMISSION"],
             no_wrap=True,
@@ -1574,6 +1593,11 @@ async def show(
         console.print("\n\n")
         console.print(table)
         console.print("\n")
+        pending_display = (
+            f"{metagraph_info.pending_root_emission.tao:.4f}"
+            if verbose
+            else millify_tao(metagraph_info.pending_root_emission.tao)
+        )
 
         if not delegate_selection:
             subnet_name_display = f": {get_subnet_name(subnet_info)}"
@@ -1638,6 +1662,7 @@ async def show(
                 f"\n  Rate: [{COLOR_PALETTE['GENERAL']['HOTKEY']}]{subnet_info.price.tao:.4f} τ/{subnet_info.symbol}[/{COLOR_PALETTE['GENERAL']['HOTKEY']}]"
                 f"\n  EMA TAO Inflow: [{COLOR_PALETTE['STAKE']['TAO']}]τ {ema_tao_inflow.tao:.4f}[/{COLOR_PALETTE['STAKE']['TAO']}]"
                 f"\n  Emission: [{COLOR_PALETTE['GENERAL']['HOTKEY']}]τ {subnet_info.tao_in_emission.tao:,.4f}[/{COLOR_PALETTE['GENERAL']['HOTKEY']}]"
+                f"\n  Pending Root Swap: [{COLOR_PALETTE['POOLS']['EXTRA_2']}]{'τ ' + (f'{metagraph_info.pending_root_emission.tao:.4f}' if verbose else millify_tao(metagraph_info.pending_root_emission.tao))}[/{COLOR_PALETTE['POOLS']['EXTRA_2']}]"
                 f"\n  TAO Pool: [{COLOR_PALETTE['POOLS']['ALPHA_IN']}]τ {tao_pool}[/{COLOR_PALETTE['POOLS']['ALPHA_IN']}]"
                 f"\n  Alpha Pool: [{COLOR_PALETTE['POOLS']['ALPHA_IN']}]{alpha_pool} {subnet_info.symbol}[/{COLOR_PALETTE['POOLS']['ALPHA_IN']}]"
                 # f"\n  Stake: [{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]{subnet_info.alpha_out.tao:,.5f} {subnet_info.symbol}[/{COLOR_PALETTE['STAKE']['STAKE_ALPHA']}]"
