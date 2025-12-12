@@ -23,7 +23,6 @@ from bittensor_cli.src.bittensor.extrinsics.mev_shield import (
     wait_for_extrinsic_by_hash,
 )
 from rich.live import Live
-from bittensor_cli.src.bittensor.minigraph import MiniGraph
 from bittensor_cli.src.commands.wallets import set_id, get_id
 from bittensor_cli.src.bittensor.utils import (
     console,
@@ -1980,13 +1979,12 @@ async def metagraph_cmd(
                 return False
 
             (
-                neurons,
+                metagraph_info,
                 difficulty_,
                 total_issuance_,
-                block,
-                subnet_state,
+                neurons,
             ) = await asyncio.gather(
-                subtensor.neurons(netuid, block_hash=block_hash),
+                subtensor.get_metagraph_info(netuid, block_hash=block_hash),
                 subtensor.get_hyperparameter(
                     param_name="Difficulty", netuid=netuid, block_hash=block_hash
                 ),
@@ -1996,23 +1994,30 @@ async def metagraph_cmd(
                     params=[],
                     block_hash=block_hash,
                 ),
-                subtensor.substrate.get_block_number(block_hash=block_hash),
-                subtensor.get_subnet_state(netuid=netuid),
+                subtensor.neurons(netuid, block_hash=block_hash),
             )
+
+        if metagraph_info is None:
+            print_error(f"Subnet with netuid: {netuid} does not exist", status)
+            return False
+
+        if len(metagraph_info.hotkeys) == 0:
+            print_error(f"Subnet {netuid} is currently empty with 0 UIDs registered.")
+            return False
 
         difficulty = int(difficulty_)
         total_issuance = Balance.from_rao(total_issuance_)
-        metagraph = MiniGraph(
-            netuid=netuid,
-            neurons=neurons,
-            subtensor=subtensor,
-            subnet_state=subnet_state,
-            block=block,
-        )
+        
+        # Create a mapping from hotkey to neuron for validator_trust lookup
+        hotkey_to_neuron = {neuron.hotkey: neuron for neuron in neurons}
+        
+        # Calculate stake_weight: tao_stake * TAO_WEIGHT + alpha_stake
+        # This approximates the old stake_weight calculation
         table_data = []
         db_table = []
         total_global_stake = 0.0
         total_local_stake = 0.0
+        total_stake_weight = 0.0
         total_rank = 0.0
         total_validator_trust = 0.0
         total_trust = 0.0
@@ -2020,62 +2025,80 @@ async def metagraph_cmd(
         total_incentive = 0.0
         total_dividends = 0.0
         total_emission = 0
-        for uid in metagraph.uids:
-            neuron = metagraph.neurons[uid]
-            ep = metagraph.axons[uid]
+        
+        for uid in range(len(metagraph_info.hotkeys)):
+            hotkey = metagraph_info.hotkeys[uid]
+            coldkey = metagraph_info.coldkeys[uid]
+            axon = metagraph_info.axons[uid]
+            
+            # Get validator_trust from neuron if available, otherwise 0.0
+            neuron = hotkey_to_neuron.get(hotkey)
+            validator_trust = neuron.validator_trust if neuron is not None else 0.0
+            
+            # Calculate stake values
+            global_stake = metagraph_info.tao_stake[uid].tao
+            local_stake = metagraph_info.alpha_stake[uid].tao
+            stake_weight = (metagraph_info.tao_stake[uid] * TAO_WEIGHT).tao + metagraph_info.alpha_stake[uid].tao
+            
+            # Get emission in rao (convert from Balance)
+            emission_rao = int(metagraph_info.emission[uid].rao)
+            
             row = [
-                str(neuron.uid),
-                "{:.4f}".format(metagraph.global_stake[uid]),
-                "{:.4f}".format(metagraph.local_stake[uid]),
-                "{:.4f}".format(metagraph.stake_weights[uid]),
-                "{:.5f}".format(metagraph.ranks[uid]),
-                "{:.5f}".format(metagraph.trust[uid]),
-                "{:.5f}".format(metagraph.consensus[uid]),
-                "{:.5f}".format(metagraph.incentive[uid]),
-                "{:.5f}".format(metagraph.dividends[uid]),
-                "{}".format(int(metagraph.emission[uid] * 1000000000)),
-                "{:.5f}".format(metagraph.validator_trust[uid]),
-                "*" if metagraph.validator_permit[uid] else "",
-                str(metagraph.block.item() - metagraph.last_update[uid].item()),
-                str(metagraph.active[uid].item()),
+                str(uid),
+                "{:.4f}".format(global_stake),
+                "{:.4f}".format(local_stake),
+                "{:.4f}".format(stake_weight),
+                "{:.5f}".format(metagraph_info.rank[uid]),
+                "{:.5f}".format(metagraph_info.trust[uid]),
+                "{:.5f}".format(metagraph_info.consensus[uid]),
+                "{:.5f}".format(metagraph_info.incentives[uid]),
+                "{:.5f}".format(metagraph_info.dividends[uid]),
+                "{}".format(emission_rao),
+                "{:.5f}".format(validator_trust),
+                "*" if metagraph_info.validator_permit[uid] else "",
+                str(metagraph_info.block - metagraph_info.last_update[uid]),
+                str(int(metagraph_info.active[uid])),
                 (
-                    ep.ip + ":" + str(ep.port)
-                    if ep.is_serving
+                    axon.ip + ":" + str(axon.port)
+                    if axon.is_serving
                     else "[light_goldenrod2]none[/light_goldenrod2]"
                 ),
-                ep.hotkey[:10],
-                ep.coldkey[:10],
+                hotkey[:10],
+                coldkey[:10],
             ]
             db_row = [
-                neuron.uid,
-                float(metagraph.global_stake[uid]),
-                float(metagraph.local_stake[uid]),
-                float(metagraph.stake_weights[uid]),
-                float(metagraph.ranks[uid]),
-                float(metagraph.trust[uid]),
-                float(metagraph.consensus[uid]),
-                float(metagraph.incentive[uid]),
-                float(metagraph.dividends[uid]),
-                int(metagraph.emission[uid] * 1000000000),
-                float(metagraph.validator_trust[uid]),
-                bool(metagraph.validator_permit[uid]),
-                metagraph.block.item() - metagraph.last_update[uid].item(),
-                metagraph.active[uid].item(),
-                (ep.ip + ":" + str(ep.port) if ep.is_serving else "ERROR"),
-                ep.hotkey[:10],
-                ep.coldkey[:10],
+                uid,
+                float(global_stake),
+                float(local_stake),
+                float(stake_weight),
+                float(metagraph_info.rank[uid]),
+                float(metagraph_info.trust[uid]),
+                float(metagraph_info.consensus[uid]),
+                float(metagraph_info.incentives[uid]),
+                float(metagraph_info.dividends[uid]),
+                emission_rao,
+                float(validator_trust),
+                bool(metagraph_info.validator_permit[uid]),
+                metagraph_info.block - metagraph_info.last_update[uid],
+                int(metagraph_info.active[uid]),
+                (axon.ip + ":" + str(axon.port) if axon.is_serving else "ERROR"),
+                hotkey[:10],
+                coldkey[:10],
             ]
             db_table.append(db_row)
-            total_global_stake += metagraph.global_stake[uid]
-            total_local_stake += metagraph.local_stake[uid]
-            total_rank += metagraph.ranks[uid]
-            total_validator_trust += metagraph.validator_trust[uid]
-            total_trust += metagraph.trust[uid]
-            total_consensus += metagraph.consensus[uid]
-            total_incentive += metagraph.incentive[uid]
-            total_dividends += metagraph.dividends[uid]
-            total_emission += int(metagraph.emission[uid] * 1000000000)
+            total_global_stake += global_stake
+            total_local_stake += local_stake
+            total_stake_weight += stake_weight
+            total_rank += metagraph_info.rank[uid]
+            total_validator_trust += validator_trust
+            total_trust += metagraph_info.trust[uid]
+            total_consensus += metagraph_info.consensus[uid]
+            total_incentive += metagraph_info.incentives[uid]
+            total_dividends += metagraph_info.dividends[uid]
+            total_emission += emission_rao
             table_data.append(row)
+        
+        num_active = sum(1 for active in metagraph_info.active if active)
         metadata_info = {
             "total_global_stake": "\u03c4 {:.5f}".format(total_global_stake),
             "total_local_stake": f"{Balance.get_unit(netuid)} "
@@ -2086,15 +2109,15 @@ async def metagraph_cmd(
             "consensus": "{:.5f}".format(total_consensus),
             "incentive": "{:.5f}".format(total_incentive),
             "dividends": "{:.5f}".format(total_dividends),
-            "emission": "\u03c1{}".format(int(total_emission)),
-            "net": f"{subtensor.network}:{metagraph.netuid}",
-            "block": str(metagraph.block.item()),
-            "N": f"{sum(metagraph.active.tolist())}/{metagraph.n.item()}",
-            "N0": str(sum(metagraph.active.tolist())),
-            "N1": str(metagraph.n.item()),
+            "emission": "\u03c1{}".format(total_emission),
+            "net": f"{subtensor.network}:{metagraph_info.netuid}",
+            "block": str(metagraph_info.block),
+            "N": f"{num_active}/{metagraph_info.num_uids}",
+            "N0": str(num_active),
+            "N1": str(metagraph_info.num_uids),
             "issuance": str(total_issuance),
             "difficulty": str(difficulty),
-            "total_neurons": str(len(metagraph.uids)),
+            "total_neurons": str(len(metagraph_info.hotkeys)),
             "table_data": json.dumps(table_data),
         }
         if not no_cache:
@@ -2143,7 +2166,7 @@ async def metagraph_cmd(
                 f"net: {metadata_info['net']}, "
                 f"block: {metadata_info['block']}, "
                 f"N: {metadata_info['N']}, "
-                f"stake: {metadata_info['stake']}, "
+                f"stake: {metadata_info['total_local_stake']}, "
                 f"issuance: {metadata_info['issuance']}, "
                 f"difficulty: {metadata_info['difficulty']}",
                 columns=[
