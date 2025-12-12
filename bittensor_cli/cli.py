@@ -767,6 +767,7 @@ class CLIManager:
     crowd_app: typer.Typer
     utils_app: typer.Typer
     view_app: typer.Typer
+    extensions_app: typer.Typer
     asyncio_runner = asyncio
 
     def __init__(self):
@@ -781,6 +782,7 @@ class CLIManager:
             "safe_staking": True,
             "allow_partial_stake": False,
             "dashboard_path": None,
+            "extensions": {},
             # Commenting this out as this needs to get updated
             # "metagraph_cols": {
             #     "UID": True,
@@ -850,6 +852,7 @@ class CLIManager:
         self.utils_app = typer.Typer(epilog=_epilog)
         self.axon_app = typer.Typer(epilog=_epilog)
         self.proxy_app = typer.Typer(epilog=_epilog)
+        self.extensions_app = typer.Typer(epilog=_epilog)
 
         # config alias
         self.app.add_typer(
@@ -962,6 +965,20 @@ class CLIManager:
             name="proxy",
             short_help="Proxy commands",
             no_args_is_help=True,
+        )
+
+        # extensions app
+        self.app.add_typer(
+            self.extensions_app,
+            name="extensions",
+            short_help="Extension commands, aliases: `ext`, `extension`",
+            no_args_is_help=True,
+        )
+        self.app.add_typer(
+            self.extensions_app, name="ext", hidden=True, no_args_is_help=True
+        )
+        self.app.add_typer(
+            self.extensions_app, name="extension", hidden=True, no_args_is_help=True
         )
 
         # config commands
@@ -1217,6 +1234,14 @@ class CLIManager:
             "execute",
             rich_help_panel=HELP_PANELS["PROXY"]["MGMT"],
         )(self.proxy_execute_announced)
+
+        # extensions commands
+        self.extensions_app.command("add")(self.extensions_add)
+        self.extensions_app.command("update")(self.extensions_update)
+        self.extensions_app.command("run")(self.extensions_run)
+        self.extensions_app.command("create")(self.extensions_create)
+        self.extensions_app.command("test")(self.extensions_test)
+        self.extensions_app.command("remove")(self.extensions_remove)
 
         # Sub command aliases
         # Wallet
@@ -1550,6 +1575,15 @@ class CLIManager:
         for k, v in config.items():
             if k in self.config.keys():
                 self.config[k] = v
+
+        # Ensure extensions directory exists
+        cli_file_path = Path(os.path.abspath(__file__))
+        extensions_dir = cli_file_path.parent / "extensions"
+        extensions_dir.mkdir(exist_ok=True)
+
+        # Ensure extensions config key exists
+        if "extensions" not in self.config:
+            self.config["extensions"] = {}
         if self.config.get("use_cache", False):
             with open(self.debug_file_path, "w+") as f:
                 f.write(
@@ -9530,6 +9564,711 @@ class CLIManager:
                     f"\nYou can update this with {arg__(f'btcli config set --network {fastest}')}"
                 )
         return True
+
+    def extensions_add(
+        self,
+        repository: Annotated[
+            str,
+            typer.Argument(
+                help="GitHub repository URL or path (e.g., 'user/repo' or 'https://github.com/user/repo')"
+            ),
+        ],
+    ):
+        """
+        Add a BTCLI extension from a GitHub repository.
+
+        The extension will be cloned to the bittensor_cli/extensions directory and registered in your config file.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions add user/repo
+        [green]$[/green] btcli extensions add https://github.com/user/repo
+        """
+        if Repo is None:
+            err_console.print(
+                "GitPython is required for extensions. Install it with: pip install GitPython"
+            )
+            raise typer.Exit(1)
+
+        # Determine extensions directory
+        cli_file_path = Path(os.path.abspath(__file__))
+        extensions_dir = cli_file_path.parent / "extensions"
+        extensions_dir.mkdir(exist_ok=True)
+
+        # Parse repository URL
+        if repository.startswith("http://") or repository.startswith("https://"):
+            repo_url = repository
+            repo_name = Path(repository).stem
+        elif "/" in repository:
+            repo_url = f"https://github.com/{repository}"
+            repo_name = repository.split("/")[-1]
+        else:
+            err_console.print(f"Invalid repository format: {repository}")
+            err_console.print(
+                "Expected format: 'user/repo' or 'https://github.com/user/repo'"
+            )
+            raise typer.Exit(1)
+
+        extension_path = extensions_dir / repo_name
+
+        # Check if extension already exists
+        if extension_path.exists():
+            if not Confirm.ask(
+                f"Extension '{repo_name}' already exists. Do you want to update it instead?"
+            ):
+                console.print("Cancelled.")
+                return
+            try:
+                repo = Repo(extension_path)
+                repo.remotes.origin.pull()
+                console.print(f"[green]Updated extension '{repo_name}'[/green]")
+            except Exception as e:
+                err_console.print(f"Error updating extension: {e}")
+                raise typer.Exit(1)
+        else:
+            # Clone the repository
+            try:
+                console.print(f"Cloning extension from {repo_url}...")
+                Repo.clone_from(repo_url, str(extension_path))
+                console.print(
+                    f"[green]Extension '{repo_name}' added successfully[/green]"
+                )
+            except GitError as e:
+                err_console.print(f"Error cloning repository: {e}")
+                raise typer.Exit(1)
+
+        # Update config
+        if "extensions" not in self.config:
+            self.config["extensions"] = {}
+
+        self.config["extensions"][repo_name] = {
+            "repository": repo_url,
+            "path": str(extension_path),
+        }
+
+        # Save config
+        with open(self.config_path, "w") as f:
+            safe_dump(self.config, f)
+
+        console.print(f"Extension '{repo_name}' registered in config.")
+
+    def extensions_update(
+        self,
+        name: Annotated[
+            Optional[str],
+            typer.Argument(
+                help="Name of the extension to update. If omitted, all extensions are updated."
+            ),
+        ] = None,
+    ):
+        """
+        Update BTCLI extensions by pulling the latest changes from their repositories.
+
+        If no extension name is provided, all installed extensions will be updated.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions update
+        [green]$[/green] btcli extensions update my-extension
+        """
+        if Repo is None:
+            err_console.print(
+                "GitPython is required for extensions. Install it with: pip install GitPython"
+            )
+            raise typer.Exit(1)
+
+        extensions = self.config.get("extensions", {})
+
+        if not extensions:
+            console.print("No extensions installed.")
+            return
+
+        if name:
+            if name not in extensions:
+                err_console.print(f"Extension '{name}' not found.")
+                raise typer.Exit(1)
+            extensions_to_update = {name: extensions[name]}
+        else:
+            extensions_to_update = extensions
+
+        for ext_name, ext_info in extensions_to_update.items():
+            ext_path = Path(ext_info.get("path", ""))
+            if not ext_path.exists():
+                err_console.print(
+                    f"Extension path not found for '{ext_name}': {ext_path}"
+                )
+                continue
+
+            try:
+                console.print(f"Updating '{ext_name}'...")
+                repo = Repo(str(ext_path))
+                repo.remotes.origin.pull()
+                console.print(f"[green]Updated '{ext_name}'[/green]")
+            except GitError as e:
+                err_console.print(f"Error updating '{ext_name}': {e}")
+
+    def extensions_run(
+        self,
+        name: Annotated[
+            str,
+            typer.Argument(help="Name of the extension to run"),
+        ],
+        args: Annotated[
+            Optional[list[str]],
+            typer.Argument(help="Arguments to pass to the extension"),
+        ] = None,
+    ):
+        """
+        Run a BTCLI extension by name.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions run my-extension
+        [green]$[/green] btcli extensions run my-extension --arg1 value1
+        """
+        extensions = self.config.get("extensions", {})
+
+        if name not in extensions:
+            err_console.print(f"Extension '{name}' not found.")
+            err_console.print(f"Available extensions: {', '.join(extensions.keys())}")
+            raise typer.Exit(1)
+
+        ext_info = extensions[name]
+        ext_path = Path(ext_info.get("path", ""))
+
+        if not ext_path.exists():
+            err_console.print(f"Extension path not found: {ext_path}")
+            raise typer.Exit(1)
+
+        # Look for main entry point files
+        # First, check for __main__.py in package directories (should be run as module)
+        entry_point = None
+        package_main_files = list(ext_path.glob("*/__main__.py"))
+        if package_main_files:
+            # Use the first __main__.py found
+            entry_point = package_main_files[0]
+        
+        # Then check common entry point names
+        if entry_point is None:
+            common_entry_points = [
+                ext_path / "main.py",
+                ext_path / "run.py",
+                ext_path / f"{name}.py",
+                ext_path / "__main__.py",
+                ext_path / "app.py",
+                ext_path / "cli.py",
+            ]
+
+            for ep in common_entry_points:
+                if ep.exists():
+                    entry_point = ep
+                    break
+
+        # If no common entry point found, check for __init__.py in package directories
+        if entry_point is None:
+            package_init_files = list(ext_path.glob("*/__init__.py"))
+            if package_init_files:
+                # Use the first __init__.py found (will be run as module)
+                entry_point = package_init_files[0]
+
+        # If still no entry point found, look for Python files with __main__ pattern
+        if entry_point is None:
+            python_files = list(ext_path.glob("*.py"))
+            # Filter out test files and common non-entry files
+            excluded_patterns = ["test_", "__pycache__", "setup.py", "conftest.py"]
+            candidate_files = [
+                f
+                for f in python_files
+                if not any(pattern in f.name for pattern in excluded_patterns)
+            ]
+
+            # Check each file for __main__ pattern
+            for py_file in candidate_files:
+                try:
+                    with open(py_file, "r") as f:
+                        content = f.read()
+                        if "__main__" in content or "if __name__" in content:
+                            entry_point = py_file
+                            break
+                except Exception:
+                    continue
+
+        # If still no entry point, check for setup.py or pyproject.toml entry points
+        if entry_point is None:
+            setup_py = ext_path / "setup.py"
+            pyproject_toml = ext_path / "pyproject.toml"
+
+            if setup_py.exists():
+                # Try to extract entry point from setup.py (basic parsing)
+                try:
+                    with open(setup_py, "r") as f:
+                        content = f.read()
+                        # Look for console_scripts or entry_points
+                        import re
+
+                        match = re.search(r"['\"]([^'\"]+\.py)['\"]", content)
+                        if match:
+                            potential_entry = ext_path / match.group(1)
+                            if potential_entry.exists():
+                                entry_point = potential_entry
+                except Exception:
+                    pass
+
+        # If still no entry point found, list available Python files
+        if entry_point is None:
+            python_files = [f for f in ext_path.glob("*.py") if f.is_file()]
+            excluded_patterns = ["test_", "__pycache__", "conftest.py"]
+            available_files = [
+                f
+                for f in python_files
+                if not any(pattern in f.name for pattern in excluded_patterns)
+            ]
+
+            if available_files:
+                err_console.print(f"No entry point found for extension '{name}'.")
+                err_console.print("Available Python files:")
+                for f in available_files[:10]:  # Show first 10
+                    err_console.print(f"  - {f.name}")
+                if len(available_files) > 10:
+                    err_console.print(f"  ... and {len(available_files) - 10} more")
+                err_console.print(
+                    "\nTip: Create a main.py file or add 'if __name__ == \"__main__\"' to your entry point file."
+                )
+            else:
+                err_console.print(f"No entry point found for extension '{name}'.")
+                # Define common_entry_points here in case it wasn't defined earlier
+                common_entry_points = [
+                    ext_path / "main.py",
+                    ext_path / "run.py",
+                    ext_path / f"{name}.py",
+                    ext_path / "__main__.py",
+                    ext_path / "app.py",
+                    ext_path / "cli.py",
+                ]
+                err_console.print(
+                    f"Expected one of: {[str(ep) for ep in common_entry_points]}"
+                )
+            raise typer.Exit(1)
+
+        # Run the extension
+        import subprocess
+        import sys
+        import os
+
+        # Set PYTHONPATH to include extension directory
+        env = os.environ.copy()
+        pythonpath = env.get("PYTHONPATH", "")
+        if pythonpath:
+            env["PYTHONPATH"] = f"{str(ext_path)}:{pythonpath}"
+        else:
+            env["PYTHONPATH"] = str(ext_path)
+
+        # Check if entry point should be run as a module
+        # Cases: __main__.py in a package directory, or __init__.py file
+        if entry_point.name == "__main__.py":
+            # Run package as module: python -m package_name
+            package_name = entry_point.parent.name
+            cmd = [sys.executable, "-m", package_name]
+            if args:
+                cmd.extend(args)
+        elif entry_point.name == "__init__.py":
+            # Run package as module: python -m package_name
+            package_name = entry_point.parent.name
+            cmd = [sys.executable, "-m", package_name]
+            if args:
+                cmd.extend(args)
+        else:
+            # Run as script
+            cmd = [sys.executable, str(entry_point)]
+            if args:
+                cmd.extend(args)
+
+        try:
+            subprocess.run(cmd, cwd=str(ext_path), env=env, check=True)
+        except subprocess.CalledProcessError as e:
+            err_console.print(
+                f"Extension '{name}' exited with error code {e.returncode}"
+            )
+            raise typer.Exit(e.returncode)
+        except Exception as e:
+            err_console.print(f"Error running extension '{name}': {e}")
+            raise typer.Exit(1)
+
+    def extensions_create(
+        self,
+        name: Annotated[
+            str,
+            typer.Argument(help="Name for the new extension"),
+        ],
+    ):
+        """
+        Create a boilerplate BTCLI extension.
+
+        This generates a template extension file that you can customize.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions create my-extension
+        """
+        cli_file_path = Path(os.path.abspath(__file__))
+        extensions_dir = cli_file_path.parent / "extensions"
+        extensions_dir.mkdir(exist_ok=True)
+
+        extension_path = extensions_dir / name
+        if extension_path.exists():
+            if not Confirm.ask(
+                f"Extension directory '{name}' already exists. Do you want to overwrite it?"
+            ):
+                console.print("Cancelled.")
+                return
+        else:
+            extension_path.mkdir(exist_ok=True)
+
+        # Create boilerplate main.py
+        boilerplate = f'''#!/usr/bin/env python3
+"""
+BTCLI Extension: {name}
+
+This is a boilerplate extension. Customize it to add your functionality.
+"""
+
+import typer
+
+app = typer.Typer()
+
+
+@app.command()
+def main():
+    """
+    Main entry point for the extension.
+    """
+    typer.echo(f"Hello from extension '{name}'!")
+    # Add your extension logic here
+
+
+if __name__ == "__main__":
+    app()
+'''
+
+        main_file = extension_path / "main.py"
+        with open(main_file, "w") as f:
+            f.write(boilerplate)
+
+        # Create README
+        readme_content = f"""# {name}
+
+BTCLI Extension
+
+## Description
+
+Add your extension description here.
+
+## Usage
+
+```bash
+btcli extensions run {name}
+```
+
+## Installation
+
+This extension is already installed. To update it:
+
+```bash
+btcli extensions update {name}
+```
+"""
+
+        readme_file = extension_path / "README.md"
+        with open(readme_file, "w") as f:
+            f.write(readme_content)
+
+        console.print(
+            f"[green]Created extension boilerplate at: {extension_path}[/green]"
+        )
+        console.print(f"Edit {main_file} to customize your extension.")
+
+    def extensions_test(
+        self,
+        name: Annotated[
+            Optional[str],
+            typer.Argument(
+                help="Name of the extension to test. If omitted, all extensions are tested."
+            ),
+        ] = None,
+    ):
+        """
+        Run tests for BTCLI extensions.
+
+        If no extension name is provided, tests for all installed extensions will be run.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions test
+        [green]$[/green] btcli extensions test my-extension
+        """
+        import subprocess
+        import sys
+
+        extensions = self.config.get("extensions", {})
+
+        if not extensions:
+            console.print("No extensions installed.")
+            return
+
+        if name:
+            if name not in extensions:
+                err_console.print(f"Extension '{name}' not found.")
+                raise typer.Exit(1)
+            extensions_to_test = {name: extensions[name]}
+        else:
+            extensions_to_test = extensions
+
+        for ext_name, ext_info in extensions_to_test.items():
+            ext_path = Path(ext_info.get("path", ""))
+            if not ext_path.exists():
+                err_console.print(
+                    f"Extension path not found for '{ext_name}': {ext_path}"
+                )
+                continue
+
+            console.print(f"Running tests for '{ext_name}'...")
+
+            # Install requirements before running tests
+            requirements_files = []
+            requirements_txt = ext_path / "requirements.txt"
+            requirements_dev_txt = ext_path / "requirements-dev.txt"
+
+            if requirements_txt.exists():
+                requirements_files.append(requirements_txt)
+            if requirements_dev_txt.exists():
+                requirements_files.append(requirements_dev_txt)
+
+            if requirements_files:
+                console.print(
+                    f"[cyan]Installing requirements for '{ext_name}'...[/cyan]"
+                )
+                for req_file in requirements_files:
+                    try:
+                        install_result = subprocess.run(
+                            [
+                                sys.executable,
+                                "-m",
+                                "pip",
+                                "install",
+                                "-q",
+                                "-r",
+                                str(req_file),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            cwd=str(ext_path),
+                        )
+                        if install_result.returncode != 0:
+                            err_console.print(
+                                f"[yellow]Warning: Failed to install requirements from {req_file.name}[/yellow]"
+                            )
+                            if install_result.stderr:
+                                err_console.print(install_result.stderr)
+                    except Exception as e:
+                        err_console.print(
+                            f"[yellow]Warning: Error installing requirements from {req_file.name}: {e}[/yellow]"
+                        )
+
+            # Check if tests directory exists - if so, pytest will discover tests automatically
+            tests_dir = ext_path / "tests"
+            has_tests_dir = tests_dir.exists() and tests_dir.is_dir()
+
+            # Also check for test files in root directory
+            root_test_files = list(ext_path.glob("test_*.py"))
+
+            if not has_tests_dir and not root_test_files:
+                # Look for test files in other locations
+                test_files = []
+                test_files.extend(ext_path.glob("test_*.py"))
+                test_files.extend(ext_path.glob("*_test.py"))
+                test_files.extend(ext_path.rglob("test_*.py"))
+                test_files.extend(ext_path.rglob("*_test.py"))
+
+                # Filter out __pycache__ and __init__.py
+                test_files = [
+                    f
+                    for f in test_files
+                    if "__pycache__" not in str(f) and "__init__.py" not in str(f)
+                ]
+
+                if not test_files:
+                    console.print(
+                        f"[yellow]No test files found for '{ext_name}'[/yellow]"
+                    )
+                    continue
+
+            # Try running pytest if available
+            try:
+                import pytest
+
+                # Add extension directory to PYTHONPATH so local packages can be imported
+                import os
+
+                env = os.environ.copy()
+                pythonpath = env.get("PYTHONPATH", "")
+                if pythonpath:
+                    env["PYTHONPATH"] = f"{str(ext_path)}:{pythonpath}"
+                else:
+                    env["PYTHONPATH"] = str(ext_path)
+
+                # Check if there's a tests directory, otherwise run pytest on the whole extension
+                tests_dir = ext_path / "tests"
+                if tests_dir.exists() and tests_dir.is_dir():
+                    # Run pytest on the tests directory specifically
+                    cmd = [sys.executable, "-m", "pytest", "tests"]
+                else:
+                    # Run pytest on the extension directory
+                    cmd = [sys.executable, "-m", "pytest", str(ext_path)]
+
+                # Run pytest from the extension directory to match normal usage
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, env=env, cwd=str(ext_path)
+                )
+
+                if result.returncode == 0:
+                    console.print(f"[green]Tests passed for '{ext_name}'[/green]")
+                elif result.returncode == 1:
+                    # Tests failed but collection was successful
+                    console.print(f"[yellow]Tests failed for '{ext_name}'[/yellow]")
+                    if result.stdout:
+                        console.print(result.stdout)
+                    if result.stderr:
+                        err_console.print(result.stderr)
+                elif result.returncode == 2:
+                    # Collection errors (e.g., import errors)
+                    console.print(
+                        f"[yellow]Test collection errors for '{ext_name}'[/yellow]"
+                    )
+                    # Show both stdout and stderr as pytest may output to either
+                    if result.stdout:
+                        err_console.print(result.stdout)
+                    if result.stderr:
+                        err_console.print(result.stderr)
+                else:
+                    # Other errors
+                    console.print(
+                        f"[yellow]Tests exited with code {result.returncode} for '{ext_name}'[/yellow]"
+                    )
+                    if result.stdout:
+                        err_console.print(result.stdout)
+                    if result.stderr:
+                        err_console.print(result.stderr)
+            except ImportError:
+                # Fallback to unittest
+                try:
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "unittest",
+                        "discover",
+                        "-s",
+                        str(ext_path),
+                        "-p",
+                        "test_*.py",
+                    ]
+                    # Add extension directory to PYTHONPATH so local packages can be imported
+                    import os
+
+                    env = os.environ.copy()
+                    pythonpath = env.get("PYTHONPATH", "")
+                    if pythonpath:
+                        env["PYTHONPATH"] = f"{str(ext_path)}:{pythonpath}"
+                    else:
+                        env["PYTHONPATH"] = str(ext_path)
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, env=env
+                    )
+
+                    if result.returncode == 0:
+                        console.print(f"[green]Tests passed for '{ext_name}'[/green]")
+                    else:
+                        console.print(f"[yellow]Tests failed for '{ext_name}'[/yellow]")
+                        if result.stderr:
+                            err_console.print(result.stderr)
+                except Exception as e:
+                    err_console.print(f"Error running tests for '{ext_name}': {e}")
+
+    def extensions_remove(
+        self,
+        name: Annotated[
+            str,
+            typer.Argument(help="Name of the extension to remove"),
+        ],
+        delete_files: Annotated[
+            bool,
+            typer.Option(
+                "--delete-files/--keep-files",
+                help="Delete the extension directory from disk. If not specified, only removes from config.",
+            ),
+        ] = False,
+    ):
+        """
+        Remove a BTCLI extension.
+
+        By default, this only removes the extension from your config file.
+        Use --delete-files to also delete the extension directory from disk.
+
+        EXAMPLE
+
+        [green]$[/green] btcli extensions remove my-extension
+        [green]$[/green] btcli extensions remove my-extension --delete-files
+        """
+        extensions = self.config.get("extensions", {})
+
+        if name not in extensions:
+            err_console.print(f"Extension '{name}' not found.")
+            err_console.print(f"Available extensions: {', '.join(extensions.keys())}")
+            raise typer.Exit(1)
+
+        ext_info = extensions[name]
+        ext_path = Path(ext_info.get("path", ""))
+
+        # Remove from config
+        del extensions[name]
+        self.config["extensions"] = extensions
+
+        # Save config
+        with open(self.config_path, "w") as f:
+            safe_dump(self.config, f)
+
+        console.print(f"[green]Extension '{name}' removed from config.[/green]")
+
+        # Optionally delete files
+        if delete_files:
+            if ext_path.exists():
+                if Confirm.ask(
+                    f"Do you want to delete the extension directory at {ext_path}?"
+                ):
+                    import shutil
+
+                    try:
+                        shutil.rmtree(str(ext_path))
+                        console.print(
+                            f"[green]Extension directory '{ext_path}' deleted.[/green]"
+                        )
+                    except Exception as e:
+                        err_console.print(f"Error deleting extension directory: {e}")
+                else:
+                    console.print(
+                        f"[yellow]Extension directory '{ext_path}' kept on disk.[/yellow]"
+                    )
+            else:
+                console.print(
+                    f"[yellow]Extension directory '{ext_path}' not found on disk.[/yellow]"
+                )
+        else:
+            if ext_path.exists():
+                console.print(
+                    f"[yellow]Extension directory '{ext_path}' kept on disk.[/yellow]"
+                )
+                console.print(
+                    f"Use {arg__('--delete-files')} to also delete the directory."
+                )
 
     def run(self):
         self.app()
