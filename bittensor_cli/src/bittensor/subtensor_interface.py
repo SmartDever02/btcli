@@ -1347,29 +1347,26 @@ class SubtensorInterface:
         Understanding the hyperparameters is crucial for comprehending how subnets are configured and
         managed, and how they interact with the network's consensus and incentive mechanisms.
         """
-        result = await self.query_runtime_api(
-            runtime_api="SubnetInfoRuntimeApi",
-            method="get_subnet_hyperparams_v2",
-            params=[netuid],
-            block_hash=block_hash,
+        result, metagraph_info = await asyncio.gather(
+            self.query_runtime_api(
+                runtime_api="SubnetInfoRuntimeApi",
+                method="get_subnet_hyperparams_v2",
+                params=[netuid],
+                block_hash=block_hash,
+            ),
+            self.get_metagraph_info(netuid, block_hash=block_hash),
         )
         if not result:
             return []
 
-        # If max_uids is not in the runtime API response, fetch it from storage
-        if "max_uids" not in result and "max_allowed_uids" not in result:
-            try:
-                max_uids_result = await self.query(
-                    module="SubtensorModule",
-                    storage_function="MaxAllowedUids",
-                    params=[netuid],
-                    block_hash=block_hash,
-                )
-                if max_uids_result is not None:
-                    result["max_uids"] = int(max_uids_result)
-            except Exception:
-                # If query fails, max_uids will default to 0 in the dataclass
-                pass
+        # Add max_uids from metagraph_info since it's not included in get_subnet_hyperparams_v2
+        if metagraph_info is not None:
+            result["max_uids"] = metagraph_info.max_uids
+        else:
+            # If metagraph_info is None, raise an error rather than silently defaulting to 0
+            raise ValueError(
+                f"Failed to retrieve metagraph info for subnet {netuid}. Cannot determine max_uids."
+            )
 
         return SubnetHyperparameters.from_any(result)
 

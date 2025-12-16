@@ -248,7 +248,7 @@ class SubnetHyperparameters(InfoBase):
             max_difficulty=decoded["max_difficulty"],
             max_regs_per_block=decoded["max_regs_per_block"],
             max_validators=decoded["max_validators"],
-            max_uids=decoded.get("max_uids") or decoded.get("max_allowed_uids", 0),
+            max_uids=decoded["max_uids"],
             max_weight_limit=decoded["max_weights_limit"],
             min_allowed_weights=decoded["min_allowed_weights"],
             min_burn=decoded["min_burn"],
